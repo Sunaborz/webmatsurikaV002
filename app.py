@@ -15,7 +15,7 @@ import tempfile
 import shutil
 from datetime import datetime
 
-APP_VERSION = "V4"
+APP_VERSION = "V2"
 
 # ページ設定
 st.set_page_config(
@@ -60,7 +60,7 @@ st.markdown("""
 
 def main():
     # ヘッダー
-    st.markdown('<h1 class="main-header">👑 アプリ版魔界大帝マツリカ・マツリちゃん　v3</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">👑 アプリ版魔界大帝マツリカ・マツリちゃん　v2</h1>', unsafe_allow_html=True)
     
     # サイドバー
     with st.sidebar:

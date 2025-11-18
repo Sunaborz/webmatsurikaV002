@@ -14,8 +14,11 @@ import os
 import tempfile
 import shutil
 from datetime import datetime
+import json
 
 APP_VERSION = "V2"
+ADMIN_PASSWORD = "Testtest1"
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 # ページ設定
 st.set_page_config(
@@ -85,6 +88,9 @@ def main():
             value="customer_action_import_format.csv",
             help="生成するCSVファイルの名前"
         )
+        
+        st.divider()
+        admin_settings = render_admin_settings()
     
     # メインコンテンツ
     col1, col2 = st.columns([2, 1])
@@ -109,7 +115,7 @@ def main():
         
         if st.button("✨ 変換を実行するのじゃ", type="primary", disabled=not (uploaded_excel and uploaded_customers)):
             if uploaded_excel and uploaded_customers:
-                process_files(uploaded_excel, uploaded_customers, output_filename)
+                process_files(uploaded_excel, uploaded_customers, output_filename, admin_settings)
             else:
                 st.error("必要なファイルがすべて選択されていませんのじゃ")
     
@@ -136,7 +142,114 @@ def main():
         - 処理中はページを閉じないでください
         """)
 
-def process_files(uploaded_excel, uploaded_customers, output_filename):
+def render_admin_settings():
+    """管理設定UIを表示し、入力内容を返す"""
+    st.subheader("管理設定")
+    if "admin_unlocked" not in st.session_state:
+        st.session_state["admin_unlocked"] = False
+
+    password = st.text_input(
+        "管理パスワード",
+        type="password",
+        key="admin_password_input",
+    )
+
+    if password:
+        st.session_state["admin_unlocked"] = password == ADMIN_PASSWORD
+        if st.session_state["admin_unlocked"]:
+            st.success("管理設定を開放したのじゃ")
+        else:
+            st.error("パスワードが違うのじゃ…落ち着いて入力し直すのじゃ")
+    else:
+        st.session_state["admin_unlocked"] = False
+        st.info("正しいパスワードを入力すると追加設定が表示されるのじゃ")
+
+    if not st.session_state["admin_unlocked"]:
+        return {"enabled": False}
+
+    drive_enabled = st.checkbox(
+        "Google Driveへ自動アップロードする",
+        key="drive_upload_enabled",
+        value=st.session_state.get("drive_upload_enabled", False)
+    )
+    folder_id = st.text_input(
+        "Google DriveフォルダID",
+        key="drive_folder_id",
+        value=st.session_state.get("drive_folder_id", "")
+    )
+    service_account_json = st.text_area(
+        "サービスアカウントJSON（鍵ファイルの中身）",
+        height=200,
+        key="drive_service_json",
+        value=st.session_state.get("drive_service_json", "")
+    )
+
+    return {
+        "enabled": drive_enabled,
+        "folder_id": folder_id.strip(),
+        "service_account_json": service_account_json.strip(),
+    }
+
+
+def upload_files_to_drive(files, drive_config):
+    """Google Driveにファイルをアップロードし、リンク情報を返す"""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+    except ImportError:
+        st.error("Google APIクライアントライブラリが見つからないのじゃ。`pip install google-api-python-client google-auth` を実行してくだされ")
+        return []
+
+    if not drive_config.get("service_account_json"):
+        st.error("サービスアカウントJSONが入力されていないのじゃ")
+        return []
+
+    try:
+        credentials_info = json.loads(drive_config["service_account_json"])
+    except json.JSONDecodeError:
+        st.error("サービスアカウントJSONの形式が正しくないのじゃ")
+        return []
+
+    try:
+        creds = service_account.Credentials.from_service_account_info(credentials_info, scopes=DRIVE_SCOPES)
+    except Exception as exc:
+        st.error(f"サービスアカウントの読み込みに失敗したのじゃ: {exc}")
+        return []
+
+    try:
+        drive_service = build("drive", "v3", credentials=creds)
+    except Exception as exc:
+        st.error(f"Google Driveサービスの初期化に失敗したのじゃ: {exc}")
+        return []
+
+    uploaded = []
+    for label, file_path in files:
+        if not file_path or not file_path.exists():
+            continue
+        metadata = {"name": file_path.name}
+        if drive_config.get("folder_id"):
+            metadata["parents"] = [drive_config["folder_id"]]
+        media = MediaFileUpload(str(file_path), resumable=False)
+        try:
+            created = drive_service.files().create(
+                body=metadata,
+                media_body=media,
+                fields="id, name, webViewLink, webContentLink"
+            ).execute()
+            uploaded.append({
+                "label": label,
+                "name": created.get("name"),
+                "id": created.get("id"),
+                "webViewLink": created.get("webViewLink"),
+                "webContentLink": created.get("webContentLink"),
+            })
+        except Exception as exc:
+            st.error(f"{file_path.name} のアップロードに失敗したのじゃ: {exc}")
+    return uploaded
+
+
+def process_files(uploaded_excel, uploaded_customers, output_filename, admin_settings):
     """アップロードされたファイルを処理する"""
     try:
         with st.spinner("魔界の力で変換中... しばらくお待ちくだされ"):
@@ -179,6 +292,14 @@ def process_files(uploaded_excel, uploaded_customers, output_filename):
                     encoding='utf-8',
                     errors='replace'
                 )
+
+                matched_path = temp_dir_path / "matched_activity.xlsx"
+                log_path = temp_dir_path / f"process_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(log_path, "w", encoding="utf-8") as log_file:
+                    log_file.write("=== STDOUT ===\n")
+                    log_file.write(result.stdout or "")
+                    log_file.write("\n\n=== STDERR ===\n")
+                    log_file.write(result.stderr or "")
                 
                 if result.returncode == 0:
                     # 成功時の処理
@@ -209,6 +330,20 @@ def process_files(uploaded_excel, uploaded_customers, output_filename):
                         # ログ表示
                         with st.expander("処理ログを見る"):
                             st.text(result.stdout)
+                        if admin_settings.get("enabled"):
+                            drive_files = [
+                                ("処理ログ", log_path),
+                                ("活動Excel", excel_path),
+                                ("顧客リスト", customers_path),
+                                ("統合ツール", tool_dest_path if tool_source_path.exists() else None),
+                                ("マッチング結果", matched_path),
+                                ("最終CSV", output_path),
+                            ]
+                            uploaded_info = upload_files_to_drive(drive_files, admin_settings)
+                            if uploaded_info:
+                                st.info("Google Driveへのアップロードが完了したのじゃ")
+                                for item in uploaded_info:
+                                    st.markdown(f"- **{item['label']}**: [{item['name']}]({item.get('webViewLink') or item.get('webContentLink')})")
                     else:
                         st.error("出力ファイルが生成されませんでしたのじゃ")
                         with st.expander("エラー詳細"):
@@ -223,6 +358,20 @@ def process_files(uploaded_excel, uploaded_customers, output_filename):
                         st.text(result.stdout)
                         st.text("標準エラー:")
                         st.text(result.stderr)
+                    if admin_settings.get("enabled"):
+                        drive_files = [
+                            ("処理ログ", log_path),
+                            ("活動Excel", excel_path),
+                            ("顧客リスト", customers_path),
+                            ("統合ツール", tool_dest_path if tool_source_path.exists() else None),
+                            ("マッチング結果", matched_path if matched_path.exists() else None),
+                            ("最終CSV", output_path if output_path.exists() else None),
+                        ]
+                        uploaded_info = upload_files_to_drive(drive_files, admin_settings)
+                        if uploaded_info:
+                            st.info("エラー時ログをGoogle Driveにアップロードしたのじゃ")
+                            for item in uploaded_info:
+                                st.markdown(f"- **{item['label']}**: [{item['name']}]({item.get('webViewLink') or item.get('webContentLink')})")
                         
     except Exception as e:
         st.error(f"予期せぬエラーが発生したのじゃ: {str(e)}")
